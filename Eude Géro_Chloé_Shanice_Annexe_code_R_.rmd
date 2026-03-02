@@ -1,0 +1,995 @@
+---
+title: "Projet d'apprentissage statistique"
+subtitle: Eude Géro, Shanice, Chloé, M2 ISIFAR
+date: '2024/01/11'
+output:
+  pdf_document:
+    toc: false
+    toc_depth: 2
+  html_notebook:
+    css: hideOutput.css
+    includes:
+      in_header: hideOutput.script
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_depth: 1
+    tocdepth: 2
+  html_document:
+    css: hideOutput.css
+    includes:
+      in_header: hideOutput.script
+    df_print: paged
+    toc: yes
+    toc_depth: '1'
+institute: Université  Paris Cité
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+
+# Nous allons créer une fonction unique qui permet de télécharger et de charger 
+# les packages si celà n'est pas fait. 
+# On créer un vecteur qui contient les packages 
+ 
+packages <- c("httr", "readr", "ggplot2", "dplyr", "data.table",
+              "knitr", "ggmosaic", "pacman", "BioStatR", "tidyr", 
+              "FactoMineR", "factoextra", "cluster", "stargazer", "tidyverse",
+              "nnet", "randomForest", "caret","pROC","MASS","pscl","ResourceSelection", "effects","lars") # On pourra compléter au fur et à mesure qu'on avance 
+
+insta <- function(pkgs) {
+  for (pkg in pkgs) {
+    # si le package n'est pas présent on l'installe
+    if (!requireNamespace(pkg, quietly = TRUE))  {
+      install.packages(pkg, dependencies = TRUE)
+    }
+    # Puis on le charge et on supprime les messages d'installation
+    suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+  }
+  # Pour confirmer que tout s'est bien passé
+  message("Tous les packages ont été installés et chargés avec succès.")
+}
+
+# Appel de la fonction
+insta(packages)
+```
+
+```{r}
+# Téléchargement des données via une api pour la reproductibilité
+url_usagers_2024   <- "https://www.data.gouv.fr/api/1/datasets/r/f57b1f58-386d-4048-8f78-2ebe435df868"
+url_lieux_2024     <- "https://www.data.gouv.fr/api/1/datasets/r/228b3cda-fdfb-4677-bd54-ab2107028d2d"
+url_caract_2024    <- "https://www.data.gouv.fr/api/1/datasets/r/83f0fb0e-e0ef-47fe-93dd-9aaee851674a"
+url_vehicules_2024 <- "https://www.data.gouv.fr/api/1/datasets/r/fd30513c-6b11-4a56-b6dc-5ac87728794b"
+
+# Nom du fichier de destination
+dossier1 <- "usagers_2024"
+dossier2 <- "lieux_2024"
+dossier3 <- "caract_2024"
+dossier4 <- "vehicules_2024"
+
+# Téléchargement du fichier (Depuis le package httr on utilise la fonction GET
+# pour le téléchargement et l'enrégistrement via le chemn d'accès dossier i, i de 
+# 1 à 4 )
+httr::GET(url_usagers_2024 , write_disk(dossier1, overwrite = TRUE))
+httr::GET(url_lieux_2024, write_disk(dossier2, overwrite = TRUE))
+httr::GET(url_caract_2024 , write_disk(dossier3, overwrite = TRUE))
+httr::GET(url_vehicules_2024, write_disk(dossier4, overwrite = TRUE))
+
+```
+
+## Préparation des données
+
+#### Récupération des données et création de la jointure
+
+Nous importons les quatre fichiers principaux du jeu de données. Chaque
+fichier correspond à une table différente:
+
+-   **carac** : caractéristiques générales de l’accident (date, heure,
+    conditions météo, etc);
+
+-   **lieux** : informations sur le lieu de l’accident;
+
+-   **vehic** : détails sur les véhicules impliqués ;
+
+-   **usagers** : informations sur les personnes impliquées;
+
+#### Créer la jointure entre les 4 fichiers
+
+```{r}
+# Lecture des fichiers CSV. fread mieux que read.csv par rapidité et mémoire. encoding si presence de caractères spéciaux
+
+carac <- fread(dossier3, encoding = "UTF-8")
+lieux <- fread(dossier2, encoding = "UTF-8")
+vehic <- fread(dossier4, encoding = "UTF-8")
+usagers <- fread(dossier1, encoding = "UTF-8")
+```
+
+Avant de procéder à la jointure, on vérifie que les tables sont bien lues et possèdent bien les colonnes attendues.
+
+```{r}
+# Petite fonction pour afficher rapidement la tête des tables 
+tables <- function (t) 
+        {
+          for (i in t) 
+          {
+            print(i %>%
+            head())
+          }
+  
+        }
+t <- list(carac = carac, lieux = lieux, vehic = vehic, usagers = usagers)
+
+tables(t) 
+```
+
+Lors de cette vérification on constate que dans la table `vehic`, la
+colonne `id_vehicule` contient un retour à la ligne `\n` à la fin du
+nom. On renomme manuellement la variable puisque c'est la seule
+concernée.
+
+```{r}
+names(vehic)[names(vehic) == "id_vehicule\n"] <- "id_vehicule"
+
+names(vehic)
+```
+
+Les quatre tables sont ensuite fusionnées selon leurs identifiants
+communs. La variable `Num_Acc` est la clé principale commune à toutes
+les tables. La variable `id_vehicule` relie les fichiers **usagers** et
+**vehicules**.
+
+```{r}
+# Fusion des tables 
+
+# usagers + véhicules
+usagers_veh <- merge(usagers, vehic, by = c("Num_Acc", "id_vehicule"), all.x = TRUE)
+
+# Jointure avec caractéristiques
+usagers_veh_carac <- merge(usagers_veh, carac, by = "Num_Acc", all.x = TRUE)
+
+# Jointure avec lieux
+data <- merge(usagers_veh_carac, lieux, by = "Num_Acc", all.x = TRUE)
+
+class(data)
+# on peut le transformer seulement en data.frame si besoin
+```
+
+#### Nettoyage et préparation des données
+
+Avant l'analyse, on doit traiter les valeurs manquantes. On commence par
+identifier la proportion de valeurs manquantes dans chaque colonne afin
+de repérer les variables qui posent problème.
+
+```{r}
+colSums(is.na(data)) / nrow(data) * 100
+```
+
+La variable `occutc` (nombre d'occupants du véhicule) contient plus de
+98% de valeurs manquantes, donc on la supprime. De plus, 2% des
+individus n'ont pas de valeur pour l'année de naissance (`an_naiss`), on
+va donc également retirer ces observations car leur suppression
+n'affecte pas la taille de l'échantillon.
+
+```{r}
+class(data)
+
+# Supprimer la colonne 'occutc'
+data[, occutc := NULL]
+
+# Supprimer les observations où 'an_nais' est manquant
+data <- data[!is.na(data$an_nais), ]
+
+# Vérification
+sum(is.na(data$an_nais))   # doit renvoyer 0
+
+```
+
+Une nouvelle variable `age` est ensuite créée à partir de l'année de
+naissance. On supprime la variable d'origine `an_naiss`, devenue
+inutile.
+
+```{r}
+data[, age := 2024 - an_nais]
+data[, an_nais := NULL]  # on supprime la colonne devenue inutile
+```
+
+Comme on a beaucoup de variables qualitatives, nous allons faire un ACM
+pour choisir les variables pertinentes.
+
+```{r}
+data <- as.data.frame(data)
+vars_quali <- c("lum", "agg", "int", "atm", "col",
+                "catr", "circ", "vosp", "prof", "plan", "surf", "infra", "situ",
+                "senc", "catv", "obs", "obsm", "choc", "manv", "motor",
+                "catu", "grav", "sexe", "trajet",
+                "secu1", "secu2", "secu3", "locp", "actp", "etatp")
+
+# data_acm est data mais avec uniquement les variables préselectionnées
+data_acm <- data[, vars_quali]
+
+# suppression des doubles
+data_acm <- data_acm[!duplicated(data_acm), ]
+```
+
+Visualisation des modalités de chaque variable:
+
+```{r}
+for (i in names(data_acm)){
+  print(unique(data_acm[[i]]))
+}
+```
+
+Comme certaines valeurs n'étaient pas correctes (des modalités qui
+n'existent pas), on a fait plusieurs modifications.
+
+```{r}
+# Recodage celui de actp
+data_acm <- data_acm %>%
+  mutate(actp = recode(actp, "A" = "10","B" = "11"))
+```
+
+```{r}
+# Calcul du pourcentage de -1 par colonne 
+colSums(data_acm == " -1", na.rm = TRUE) / nrow(data_acm) * 100
+
+# Suppression de toutes les lignes contenant un -1
+data_acm <- data_acm[!apply(data_acm == -1, 1, any), ]
+```
+
+```{r}
+# On garde celles qui comportent ce " -1"
+p <- colSums(data_acm == " -1", na.rm = TRUE) / nrow(data_acm) * 100
+```
+
+Trop d'éléments erronés: on va supprimer les variables qui en
+contiennent beaucoup, puis les lignes.
+
+```{r}
+# Colonnes à garder (celles avec moins de 40 % de " -1")
+col_a_garder <- names(which(p < 0.04))
+
+# Mise à jour du data frame
+data_acm <- data_acm[, col_a_garder]
+
+# Suppression
+data_acm <- data_acm[!apply(data_acm == " -1", 1, any), ]
+```
+
+Conversion en facteurs pour ACM
+
+```{r}
+data_acm[] <- lapply(data_acm, function(x) as.factor(as.character(x)))
+
+acm <- MCA(data_acm, graph = FALSE)
+
+q1 <- fviz_mca_ind(acm,label = "none", # pas de noms sur les points
+             repel = TRUE,   # évite les chevauchements
+             title = "Projection des individus (ACM)",
+             ggtheme = theme_minimal())
+q1
+```
+
+
+```{r}
+q2 <- fviz_mca_var(acm, repel = TRUE, title = "Projection des modalités (ACM)",
+             ggtheme = theme_minimal())
+q2
+
+```
+
+```{r}
+q3 <- fviz_contrib(acm, choice = "var", axes = 1, top = 25) +
+  ggtitle("Variables les plus contributives — Axe 1")
+q3
+```
+
+```{r}
+q4 <- fviz_contrib(acm, choice = "var", axes = 2, top = 25) +
+  ggtitle("Variables les plus contributives — Axe 2")
+q4
+```
+Les variables qualitative que nous pouvons retenir sont :
+agg, catr, lum, obsm, obsf, catu, int, col, grav, manv, obs et choc qui
+traduisent à la fois le contexte, la gravité et la dynamique de
+l’accident.
+
+#### Sélection des variables pertinentes
+
+Pour l'analyse statistique et la modélisation, seules les variables
+jugées pertinentes sont conservées. Voici la sélection effectuée, et
+leurs description :
+
+```{r}
+#Nous sélectionnons les variables importantes
+ variables_importantes <- c(
+ # On prendra les quantis et les qualis que l'ont vient de trouver   
+ # Pour une meilleure visibilité, nous avons
+ # voulu écrire tout en colonne
+   
+ "Num_Acc",  # Identifiant unique
+ "dep",      # Département
+ "com",      # Commune
+ "catr",     # Catégorie de route
+ "jour",     # Jour
+ "mois",     # Mois
+ "hrmn",     # Heure
+ "lum",      # Conditions d'éclairage
+ "atm",      # Conditions atmosphériques
+ "surf",     # État de surface
+ "circ",     # Régime de circulation
+ "vma",      # Vitesse maximale autorisée
+ "nbv",      # Nombre de voies
+ "grav",     # Gravité des blessures
+ "catu",     # Catégorie d’usager
+ "sexe",     # Sexe de l’usager
+ "age",      # Age de l'usager
+ "situ",     # Situation de l'accident
+ "infra",    # Infrastructures
+ "choc",     # Point de choc initial
+ "manv",     # Manoeuvre principale
+ "obsm",    # Obstacle mobile heurté 
+ "obs",     # Obstacle fixe heurté 
+ "col" ,     # Type de collision
+ "prof"      # Profil de la route
+ )
+```
+
+On crée ensuite un **data.frame** contenant uniquement ces variables
+pertinentes.
+
+```{r}
+data_df <- as.data.frame(data)
+data_df <- data_df[, variables_importantes]
+head(data_df)
+```
+
+
+#### Départements (explications à ajouter)
+
+Pour une meilleure visualisation des départements région et communes
+nous avons voulu télécharger la base des donneés départements.csv
+
+```{r}
+# Pour une meilleure visualisation des départements région et communes nous avons 
+# voulu télécharger la base des donneés départements.csv 
+
+url_departements   <- "https://www.data.gouv.fr/api/1/datasets/r/70cef74f-70b1-495a-8500-c089229c0254"
+dossier5 <- "departements.csv"
+httr::GET(url_departements  , write_disk(dossier5, overwrite = TRUE))
+departements <- fread (dossier5)
+```
+
+```{r}
+departements <- as.data.frame(departements)
+
+#Liste des départements d'outre-mer à exclure
+ list_outre_mer<-c('971', '972', '973', '974', '975','976', '977',
+ '978', '986', '987', '988')
+ 
+ #On filtre les départements en excluant ceux d'outre-mer
+ data_sansdepo<-data_df %>%
+   
+ # on filtre en retirant les éléments qui appartiennent au vecteur précédemment
+ # créer
+ filter(!dep%in% list_outre_mer)
+ data_sansdepo <- as.data.frame(data_sansdepo)
+ # Vérification des résultats
+ head(data_sansdepo)
+```
+
+```{r}
+# Renommons la colonne 'dep' dans data_sansdepo pour correspondre à la 
+# variable 'code_departement' afin de faciliter la fusion des tables
+colnames(data_sansdepo)[which(colnames(data_sansdepo) == "dep")] <- "code_departement"
+
+# Jointure des deux tables sur 'code_departement'
+data <- data_sansdepo %>%
+  left_join(departements, by = "code_departement")
+
+# Visualisation du résultat
+head(data)
+
+```
+
+```{r}
+# Déterminons les doublons dans la base (causés sûrement par les jointures)
+sum(duplicated(data))
+
+# Suppression des doublons (lignes)
+data <- data[!duplicated(data), ]
+
+```
+
+```{r}
+# Diagramme en barres pour visualiser le nombre d'accidents par région
+
+# Comptons le nombre d'accidents par région
+# La fonction aggregate regroupe les données par nom_region.
+# Elle applique une fonction personnalisée (étudiée en MIASHS
+# pour les calculs d’intégrales dans le processus de simulation d’une variable
+# aléatoire par la méthode du rejet) qui compte le nombre unique d’accidents
+# ('Num_Acc'). Cela génère donc une table avec une colonne pour les régions
+# et une autre pour le nombre d'accidents.
+accidents_par_region <- aggregate(Num_Acc ~ nom_region, data = data,
+                                  FUN = function(x) length(unique(x)))
+
+# Renommons les colonnes pour une meilleure lisibilité
+colnames(accidents_par_region) <- c("Région", "Nombre_d_Accidents")
+
+# Création du graphique des accidents par région
+p1 <- ggplot(accidents_par_region, aes(x = reorder(Région, -Nombre_d_Accidents),
+                                 y = Nombre_d_Accidents, fill = Région)) +
+  # On crée des diagrammes en barres
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  # On nomme les axes
+  labs(title = "Nombre d'Accidents par Région",
+       x = "Région",
+       y = "Nombre d'Accidents") +
+  # Inverse les axes pour une meilleure lisibilité
+  coord_flip() +
+  theme(legend.position = "none")
+p1
+```
+
+
+```{r}
+# Filtrons les données pour la région Île-de-France
+idf_data <- subset(data, nom_region == "Île-de-France")
+
+# Comptons le nombre d'accidents par département dans cette région
+accidents_par_departement <- aggregate(Num_Acc ~ nom_departement,
+                                       data = idf_data,
+                                       FUN = function(x) length(unique(x)))
+
+# On renomme les colonnes pour une meilleure lisibilité
+colnames(accidents_par_departement) <- c("Département", "Nombre_d_Accidents")
+
+# Création du graphique des accidents par département avec des couleurs variées
+p2 <- ggplot(accidents_par_departement, aes(x = Département,
+                                      y = Nombre_d_Accidents,
+                                      fill = Département)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  theme_minimal() +
+  labs(title = "Nombre d'accidents par département en Île-de-France",
+       x = "Départements",
+       y = "Nombre d'accidents") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("#FF9999", "#FFCC99", "#CCCCFF",
+                               "#99CCFF", "#FFB3E6", "#C2F0C2",
+                               "#FFD700", "#40E0D0"))
+p2
+```
+
+```{r}
+ # Filtrons les données pour la région Île-de-France
+idf_data <- subset(data, nom_region == "Île-de-France")
+
+# Suppression des doublons pour ne garder qu'une seule ligne par accident
+idf_data_unique <- idf_data[!duplicated(idf_data$Num_Acc), ]
+
+# Vérifions le nombre total d'accidents uniques en Île-de-France
+total_idf_accidents <- nrow(idf_data_unique)
+print(paste("Nombre total d'accidents uniques en Île-de-France :", total_idf_accidents))
+
+# Aperçu de la table obtenue
+head(idf_data_unique)
+
+```
+
+La variable `grav` comporte initialement 4 niveaux (1=Indemne, 2=Tué,
+3=Blessé hospitalisé, 4=Blessé léger). Pour faciliter la modélisation,
+cette variable est transformée en une variable binaire `grav_bin`,
+distinguant les accidents graves des accidents non graves. Donc pour le
+regroupement on aura: `grav_binaire`: (0=Indemne/Léger,
+1=Hospitalisé/Tué)
+
+```{r}
+# Créons la variable binaire de gravité (0 = léger, 1 = grave)
+idf_data_unique$grav_bin <- ifelse(idf_data_unique$grav %in% c(2, 3), 1, 0)
+
+# Recode les niveaux de gravité pour des noms explicites
+idf_data_unique$gravite <- factor(idf_data_unique$grav_bin,
+                                  levels = c(0, 1),
+                                  labels = c("Indemne ou Blessé léger",
+                                             "Blessé hospitalisé ou Tué"))
+
+# Créons un graphique de répartition des accidents en Île-de-France par niveau 
+# de gravité
+p3 <- ggplot(idf_data_unique, aes(x = gravite, fill = gravite)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Répartition des accidents en Île-de-France par niveau de gravité",
+       x = "Niveau de gravité",
+       y = "Nombre d'accidents") +
+  scale_fill_manual(values = c("#4CAF50", "#FF7043")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p3
+```
+
+```{r}
+# Recode les catégories de route pour des noms explicites
+idf_data_unique$categorie_route <- factor(idf_data_unique$catr,
+                                            levels = c(1, 2, 3, 4, 5, 6, 7, 9),
+                                            labels = c("Autoroute",
+                                                       "Route nationale",
+                                                       "Route départementale",
+                                                       "Voie communale",
+                                                       "Hors réseau public",
+                                                       "Parc de stationnement",
+                                                       "Zone piétonne",
+                                                       "Autre"))
+
+# Créons un graphique de répartition des accidents par catégorie de route
+p4 <- ggplot(idf_data_unique, aes(x = categorie_route, fill = categorie_route)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Répartition des accidents en idf par catégorie de route",
+       x = "Catégorie de route",
+       y = "Nombre d'accidents") +
+  scale_fill_manual(values = c("#1E88E5", "#FFC107", "#8E24AA", "#43A047",
+                               "#FF5722", "#8D6E63", "#4DB6AC", "#9E9E9E")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p4
+
+```
+
+```{r}
+# Recode les conditions d'éclairage (variable 'lum') pour des noms explicites
+idf_data_unique$conditions_lum <- factor(idf_data_unique$lum,
+                                         levels = c(1, 2, 3, 4, 5),
+                                         labels = c("Plein jour",
+                                                    "Crépuscule ou aube",
+                                                    "Nuit sans éclairage public",
+                                                    "Nuit avec éclairage public 
+                                                    non allumé",
+                                                    "Nuit avec éclairage public 
+                                                    allumé"))
+
+# Créons un graphique de répartition des accidents selon les conditions 
+# d'éclairage
+p5 <- ggplot(idf_data_unique, aes(x = conditions_lum, fill = conditions_lum)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Répartition des accidents en Île-de-France selon les conditions 
+       d'éclairage",
+       x = "Conditions d'éclairage",
+       y = "Nombre d'accidents") +
+  scale_fill_manual(values = c("#FFD700", "#FFA500", "#8E24AA", "#1565C0", "#424242")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p5
+```
+
+```{r}
+# Recode le profil en long (variable 'prof') pour des noms explicites
+idf_data_unique$profil_route <- factor(idf_data_unique$prof,
+                                       levels = c(-1, 1, 2, 3, 4),
+                                       labels = c("Non renseigné",
+                                                  "Plat",
+                                                  "Pente",
+                                                  "Sommet de côte",
+                                                  "Bas de côte"))
+idf_data_unique <- idf_data_unique[!is.na(idf_data_unique$profil_route), ]
+
+# Créons un graphique de répartition des accidents selon le profil de la route
+p6 <- ggplot(idf_data_unique, aes(x = profil_route, fill = profil_route)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Répartition des accidents en Île-de-France selon le profil de la route",
+       x = "Profil de la route",
+       y = "Nombre d'accidents") +
+  scale_fill_manual(values = c("#BDBDBD", "#4CAF50", "#FF9800", "#2196F3", "#8E24AA")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p6
+```
+
+```{r}
+# Recode la vitesse maximale autorisée (variable 'vma') en catégories
+idf_data_unique$vitesse_max <- factor(idf_data_unique$vma,
+                                      levels = c(10, 20, 30, 40, 50, 70, 80, 90,
+                                                 100, 110, 120, 130),
+                                      labels = c("10 km/h", "20 km/h", "30 km/h",
+                                                 "40 km/h", "50 km/h",
+                                                 "70 km/h", "80 km/h", "90 km/h", 
+                                                 "100 km/h", 
+                                                 "110 km/h", "120 km/h", 
+                                                 "130 km/h"))
+
+idf_data_unique <- idf_data_unique[!is.na(idf_data_unique$vitesse_max), ] 
+# les lignes qui comportent des valeurs différentes de ses vitesses sont 
+# transformées automatiquements en NA donc on supprime.
+
+# Créons un graphique de répartition des accidents selon la vitesse maximale 
+# autorisée
+p7 <- ggplot(idf_data_unique, aes(x = vitesse_max, fill = vitesse_max)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Répartition des accidents en Île-de-France selon la vitesse 
+       maximale autorisée",
+       x = "Vitesse maximale autorisée",
+       y = "Nombre d'accidents") +
+  scale_fill_manual(values = c("#4CAF50", "#8BC34A", "#CDDC39", "#FFC107", "#FF9800",
+                               "#FF5722", "#E91E63", "#9C27B0", "#3F51B5", "#2196F3",
+                               "#00BCD4", "#009688")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p7
+```
+
+```{r}
+nrow(idf_data_unique)
+
+```
+
+```{r}
+# Recode les conditions atmosphériques pour des noms explicites
+idf_data_unique$conditions_atm <- factor(idf_data_unique$atm,
+                                         levels = c(-1, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+                                         labels = c("Non renseigné",
+                                                    "Normale",
+                                                    "Pluie légère",
+                                                    "Pluie forte",
+                                                    "Neige / Grêle",
+                                                    "Brouillard / Fumée",
+                                                    "Vent fort / Tempête",
+                                                    "Temps éblouissant",
+                                                    "Temps couvert",
+                                                    "Autre"))
+
+# Répartition des accidents selon les conditions atmosphériques
+p8 <- ggplot(idf_data_unique, aes(x = conditions_atm, fill = conditions_atm)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Répartition des accidents en Île-de-France selon les conditions
+       atmosphériques",
+       x = "Conditions atmosphériques",
+       y = "Nombre d'accidents") +
+  scale_fill_manual(values = c("#BDBDBD", "#4CAF50", "#42A5F5", "#1E88E5",
+                               "#90CAF9", "#FFB300", "#F4511E", "#8E24AA",
+                               "#9CCC65", "#757575")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p8
+
+```
+
+# I - Modèles
+
+## a) Régression logistique
+
+```{r}
+idf_data_unique$categorie_usager <- factor(idf_data_unique$catu,
+                               levels = c(1, 2, 3),
+                               labels = c("Conducteur",
+                                          "Passager",
+                                          "Piéton"))
+# Variables qu'il reste à convertir 
+# les variables qualitatives
+var_quali <- c("circ","manv","col","surf","mois","grav_bin" )
+
+idf_data_unique[var_quali] <- lapply(idf_data_unique[var_quali], as.factor) # Pour 
+# éviter de tout convertir manuellement
+
+set.seed(123)
+n <- nrow(idf_data_unique)
+train_index <- sample(1:n, size = 0.8 * n)
+train_data <- idf_data_unique[train_index, ]
+test_data  <- idf_data_unique[-train_index, ]
+modele_logistique <- glm(grav_bin ~ vma + categorie_route + 
+                           profil_route + conditions_atm + conditions_lum + 
+                           age + sexe + categorie_usager + circ + manv + col + surf + mois + nbv, data = train_data,
+                         family = binomial(link = "logit"))
+```
+
+```{r}
+summary(modele_logistique)
+```
+
+```{r}
+# ROC et AUC 
+proba <- predict(modele_logistique, test_data, type="response")
+roc_obj <- roc(test_data$grav_bin, proba)
+plot(roc_obj); auc(roc_obj)
+
+# Matrice de confusion (on choisit un seuil 0.5) 
+pred <- ifelse(proba>0.5,1,0)
+mc <- table(Reel=test_data$grav_bin, Pred=pred)
+mc
+accuracy <- sum(diag(mc))/sum(mc)
+accuracy
+
+```
+
+
+
+```{r}
+# Calcul des Odds Ratios (effets multiplicatifs)
+exp(coef(modele_logistique))  # pour obtenir les odds ratios
+```
+
+
+## b) Random Forest
+
+```{r}
+
+# Vérification des niveaux de facteurs 
+sapply(idf_data_unique, function(x) if(is.factor(x)) nlevels(x))
+
+```
+
+```{r}
+# Mise en place du modèle
+rF_gravite <- randomForest(grav_bin ~ age + mois + manv + vma + nbv+col+circ+lum+atm+catr+sexe+prof+surf+catu, data = train_data, ntree = 500,mtry = 4,importance = TRUE)
+```
+
+```{r}
+# Affichage du résumé
+print(rF_gravite)
+
+# Visualisation de l'importance des variables
+varImpPlot(rF_gravite, main = "Importance des variables dans la prédiction de la gravité")
+
+```
+
+### Validation du modèle
+
+```{r}
+# Prédiction sur l'échantillon de test
+results <- predict(rF_gravite, test_data)
+
+# Matrice de confusion
+cov <- table(Réel = test_data$grav_bin, Prédit = results)
+print(cov)
+
+# Calcul des métriques de performance
+qualité <- sum(diag(cov)) / sum(cov) * 100
+print(qualité)
+```
+```{r}
+# Si nécessaire :
+# install.packages("pROC")
+library(pROC)
+
+# Prédictions de probabilité sur l'échantillon test
+# (on récupère la proba d'être dans la classe "1" = accident grave)
+proba_rf <- predict(rF_gravite, newdata = test_data, type = "prob")[, "1"]
+
+# Courbe ROC
+roc_rf <- roc(response = test_data$grav_bin,
+              predictor = proba_rf,
+              levels = c("0", "1"),      # ordre : 0 = non grave, 1 = grave
+              direction = "<")
+
+# Afficher l'AUC
+auc(roc_rf)
+
+# Tracer la courbe ROC
+plot(roc_rf, main = "Courbe ROC - Random Forest")
+
+```
+
+
+```{r}
+# Extraction des variables les plus importantes
+import <- as.data.frame(importance(rF_gravite))
+import$Variable <- rownames(import)
+import <- import[order(-import$MeanDecreaseGini), ]
+
+# Top 10 des variables
+top10 <- head(import, 10)
+print(top10)
+
+# Graphique des 10 variables les plus importantes
+ggplot(top10, aes(x = reorder(Variable, MeanDecreaseGini), 
+                   y = MeanDecreaseGini, 
+                   fill = Variable)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Top 10 des variables influençant la gravité des accidents",
+       x = "Variables",
+       y = "Importance (Mean Decrease Gini)") +
+  scale_fill_viridis_d()
+
+```
+
+#### Modele LASSO
+
+```{r}
+library(lars)
+```
+
+```{r}
+#Construction de notre modele
+X<-model.matrix(grav_bin ~ age + mois + manv + vma + nbv+col+circ+lum+atm+catr+sexe+prof+surf+catu, data = train_data)[,-1]
+y<-as.numeric(train_data$grav_bin)-1
+```
+
+```{r}
+# On entre les variables explicatives et notre vecteur apprentissage dans le modèle lasso
+mod_lasso<-lars(X,y, type = "lasso")
+print(mod_lasso)
+```
+
+```{r}
+best_step <- which.min(mod_lasso$RSS) 
+```
+
+Le principe est qu'à chaque étape, on ajuste notre modèle. Selon le
+modèle lasso, toute les variables permettent de prédire et d'ajuster la
+gravité d'un accident de route.
+
+```{r}
+coef(mod_lasso)
+```
+
+On voit selon les coefficients que les facteurs explicatifs sont
+différents du modèle random forest. Mais on voit avec plus de
+précisions, les variables impactantes. Les usagers notamment les
+piétons, de sexe masculin semblent les plus touchés. Les voies dont la
+vitesse maximale est 80km/h et sont de type départemantale, sont les
+voies où l'on risque le plus d'accident. C'est très interessant mais on
+voit aussi que des variables pa réellement explicatives ont un poids sur
+notre modèle. Notamment les manoeuvres non renseignées.
+
+```{r}
+predict_lasso<-predict(mod_lasso,X,s = best_step, type = "fit")$fit
+```
+
+```{r}
+predict_class <- ifelse(predict_lasso> 0.5, 1, 0)
+```
+
+En effet, le moddèle lasso n'est pas réellement construit pour les
+variables qualitatives. Noua avons donc du interpréter les valeurs en
+dessous de 0.5, comme des accidents qui n'ont pas mené à
+l'hospitalisation.
+
+```{r}
+#Matrice de confusion
+cov_lm<-table(Observé=y,Prédit=predict_class)
+cov_lm
+#Qualité du modèle linéaire 
+sum(diag(cov_lm))/sum(cov_lm)
+```
+
+Cependant, la qualité de notre modèle reste satisfaisante. 
+
+### c) Analyse discriminante linéaire
+
+```{r}
+library(MASS)
+library(pROC)
+```
+
+```{r}
+# Modèle LDA
+modele_lda <- lda(grav_bin ~ age + mois + manv + vma + nbv+col+circ+lum+atm+catr+
+                    sexe+prof+surf+catu, data = train_data)
+modele_lda
+```
+
+Visualisation:
+
+```{r}
+proj <- predict(modele_lda)
+
+plot_df <- data.frame(
+  age = train_data$age,
+  LD1 = proj$x[,1],
+  grav_bin = train_data$grav_bin
+)
+
+ggplot(plot_df, aes(x = age, y = LD1, color = grav_bin)) +
+  geom_point(alpha = 0.6, size = 2) +
+  scale_color_manual(
+    values = c("0" = "turquoise", "1" = "red"),
+    labels = c("0" = "Non grave", "1" = "Grave"),
+    name = "Gravité"
+  ) +
+  labs(
+    title = "Âge vs LD1 — Influence de l'âge sur la gravité",
+    x = "Âge",
+    y = "Axe discriminant LD1"
+  ) +
+  theme_minimal()
+
+```
+
+
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Table de correspondance des étiquettes SURF
+surf_labels <- c(
+  "1" = "1 : Normale",
+  "2" = "2 : Mouillée",
+  "3" = "3 : Flaques",
+  "4" = "4 : Enneigée",
+  "5" = "5 : Boue",
+  "6" = "6 : Verglas",
+  "7" = "7 : Autre",
+  "8" = "8 : Huile",
+  "9" = "9 : Obstacle"
+)
+
+# --- Équilibrage des classes ---
+set.seed(123)
+n_grave <- sum(idf_data_unique$grav_bin == 1)
+
+df_equilibre <- idf_data_unique %>%
+  filter(grav_bin == 0) %>% sample_n(n_grave) %>%
+  bind_rows(idf_data_unique %>% filter(grav_bin == 1))
+
+# --- Préparation des données pour le graphique ---
+df_plot <- df_equilibre %>%
+  group_by(surf, grav_bin) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n))
+
+# --- Graphique avec noms complets ---
+ggplot(df_plot, aes(x = factor(surf, labels = surf_labels),
+                    y = prop, fill = factor(grav_bin))) +
+  geom_col(position = "fill") +
+  scale_fill_manual(
+    values = c("0" = "turquoise", "1" = "red"),
+    labels = c("0" = "Non grave", "1" = "Grave"),
+    name = "Gravité"
+  ) +
+  labs(title = "Répartition équilibrée de la gravité selon l'état de la chaussée",
+       x = "État de la chaussée (SURF)",
+       y = "Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+```{r}
+proj <- predict(modele_lda)
+
+ggplot(data.frame(LD1 = proj$x[,1], grav_bin = train_data$grav_bin),
+       aes(x = LD1, fill = grav_bin)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution du score LD1 par classe",
+       x = "LD1",
+       y = "Densité",
+       fill = "Gravité") +
+  theme_minimal()
+```
+
+
+
+```{r}
+# Prédictions
+pred_lda <- predict(modele_lda, newdata = test_data)
+pred_classes <- pred_lda$class
+
+# Matrice de confusion "maison"
+mat_conf <- table(Réel = test_data$grav_bin, Prédit = pred_classes)
+mat_conf
+
+# Taux de bonne classification
+accuracy <- sum(diag(mat_conf)) / sum(mat_conf)
+cat("Taux de bonne classification :", round(accuracy, 3), "\n")
+```
+
+
+
+```{r}
+# Courbe ROC et AUC
+prob_lda <- pred_lda$posterior[, 2]
+roc_lda <- roc(as.numeric(as.character(test_data$grav_bin)), prob_lda)
+plot(roc_lda, main = "Courbe ROC - LDA", col = "blue", lwd = 2)
+auc_lda <- auc(roc_lda)
+cat("AUC du modèle LDA :", round(auc_lda, 3), "\n")
+```
+
+
+
+
+
