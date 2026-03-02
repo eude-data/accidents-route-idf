@@ -1,7 +1,7 @@
 # 🚗 Gravité des accidents de la route en Île-de-France
 
 > Analyse discriminante · Random Forest · Régression logistique  
-> Cours *Apprentissage Statistique* — M2 ISIFAR · Université Paris Cité  
+> Cours *Apprentissage Statistique* - M2 ISIFAR · Université Paris Cité  
 > En collaboration avec Chloé & Shanice · Novembre 2025
 
 ---
